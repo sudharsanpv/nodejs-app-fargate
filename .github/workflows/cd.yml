@@ -1,0 +1,59 @@
+name: CD - Deploy to Amazon ECS Fargate
+
+on:
+  workflow_run:
+    workflows: ["ci"]  # must match your CI workflow name
+    types:
+      - completed
+
+env:
+  AWS_REGION: us-east-1
+  IMAGE_TAG: github-${{ github.sha }}
+  IMAGE_URI: 416419090931.dkr.ecr.us-east-1.amazonaws.com/node-js:github-${{ github.sha }}
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download existing ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ secrets.ECS_TASK_DEFINITION_NAME }} \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+      - name: Update image in task definition
+        run: |
+          echo "Updating container image to $IMAGE_URI"
+          jq --arg IMAGE "$IMAGE_URI" \
+             '.containerDefinitions[0].image = $IMAGE' \
+             task-definition.json > updated-task-definition.json
+
+      - name: Register new task definition revision
+        id: register-task
+        run: |
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://updated-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task_def_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
+      - name: Deploy to ECS Fargate
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.register-task.outputs.task_def_arn }}
+          service: ${{ secrets.ECS_SERVICE_NAME }}
+          cluster: ${{ secrets.ECS_CLUSTER_NAME }}
+          wait-for-service-stability: true
